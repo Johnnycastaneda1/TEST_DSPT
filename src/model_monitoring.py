@@ -1,19 +1,21 @@
-# model_monitoring.py
 import os
 import time
 import pandas as pd
 import requests
 import streamlit as st
+st.set_page_config(page_title="Monitoreo del Modelo", layout="wide")
 import plotly.express as px
 import plotly.graph_objects as go
-from evidently import Report 
-from evidently.presets import DataDriftPreset
+from evidently.report import Report 
+from evidently.metric_preset import DataDriftPreset
 from sklearn.model_selection import train_test_split
+from src.cargar_datos import cargarDatos
+import numpy as np
+
 # ================================
 # 1. Configuración
 # ================================
-API_URL = "http://localhost:8000/predict_batch"
-DATASET_PATH = ""   # dataset transformado
+API_URL = "http://localhost:8000/predict"
 MONITOR_LOG = "monitoring_log.csv"  #dataset para monitorear
 
 # ================================
@@ -21,7 +23,7 @@ MONITOR_LOG = "monitoring_log.csv"  #dataset para monitorear
 # ================================
 @st.cache_data
 def load_data():
-    df = pd.read_csv(DATASET_PATH)
+    df = cargarDatos()
     target = "Pago_atiempo"
     X = df.drop(columns=[target])
     y = df[target]
@@ -36,12 +38,25 @@ X_ref, X_new, y_ref, y_new = load_data()
 # 3. API para predicciones
 # ================================
 def get_predictions(X_batch: pd.DataFrame):
-    payload = {"batch": X_batch.values.tolist()}
     try:
+        # 🔥 convertir timestamps a string
+        X_batch = X_batch.copy()
+
+        for col in X_batch.select_dtypes(include=["datetime64[ns]"]).columns:
+            X_batch[col] = X_batch[col].astype(str)
+
+        X_batch = X_batch.fillna(0)
+        X_batch = X_batch.replace([np.inf, -np.inf], 0)
+
+        payload = {
+            "data": X_batch.to_dict(orient="records")
+        }
+
         response = requests.post(API_URL, json=payload)
         response.raise_for_status()
-        preds = response.json()["predictions"]
-        return preds
+
+        return response.json()["predictions"]
+
     except Exception as e:
         st.error(f"❌ Error conectando con la API: {e}")
         return None
@@ -70,7 +85,6 @@ def generate_drift_report(ref_data, new_data):
 # ================================
 # 6. Streamlit UI con gráficas
 # ================================
-st.set_page_config(page_title="Monitoreo del Modelo", layout="wide")
 st.title("📊 Monitoreo del Modelo en Producción")
 
 # Métricas principales en la parte superior
