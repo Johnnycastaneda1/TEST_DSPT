@@ -1,0 +1,31 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Entornos virtuales
+venv/
+.env/
+
+# Git
+.git/
+.gitignore
+
+# Archivos pesados / innecesarios
+*.ipynb
+*.csv
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache de herramientas
+.pytest_cache/
+.mypy_cache/
+
+# Otros
+node_modules/

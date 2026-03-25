@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import joblib
 
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import (
@@ -13,15 +14,19 @@ from sklearn.model_selection import (
 
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
+from src.ft_engineering import build_preprocessor, _get_feature_columns
 
-# métricas utilizadas en validación cruzada
+# IMPORTANTE: carga de datos
+from src.cargar_datos import cargarDatos
+
+# modelo (puedes cambiarlo)
+from sklearn.ensemble import RandomForestClassifier
+
+
 scoring_metrics = ["accuracy", "precision", "recall", "f1", "roc_auc"]
 
 
 def summarize_classification(y_true, y_pred):
-    """
-    Calcula métricas básicas de clasificación
-    """
     return {
         "accuracy": accuracy_score(y_true, y_pred),
         "precision": precision_score(y_true, y_pred, zero_division=0),
@@ -34,50 +39,76 @@ def build_model(
     classifier_fn,
     data_params: dict,
     test_frac: float = 0.2,
+    save_path_modelo: str = "models/model.joblib",
+    save_path_data: str = "models/test_data.joblib"
 ) -> dict:
-
-    """
-    Function to train a classification model
-    """
 
     name_of_y_col = data_params["name_of_y_col"]
     names_of_x_cols = data_params["names_of_x_cols"]
     dataset = data_params["dataset"]
 
-    X = dataset[names_of_x_cols]
-    Y = dataset[name_of_y_col]
+    # ---------------------------
+    # 1. DATA
+    # ---------------------------
+    X = dataset[names_of_x_cols].copy() # Riesgo de Leakage
+    # 🔥 FIX: asegurar tipos consistentes
+    for col in ["tipo_laboral", "tendencia_ingresos", "tipo_credito"]:
+        if col in X.columns:
+            X[col] = X[col].astype(str)
+    Y = dataset[name_of_y_col].copy()
+
+    if "fecha_prestamo" in X.columns:
+        X = X.drop(columns=["fecha_prestamo"])
 
     x_train, x_test, y_train, y_test = train_test_split(
         X, Y, test_size=test_frac, random_state=1234
     )
 
+    # ---------------------------
+    # 2. PREPROCESSOR
+    # ---------------------------
+    num, cat, ord_ = _get_feature_columns(x_train)
+    preprocessor = build_preprocessor(num, cat, ord_)
+
+    # ---------------------------
+    # 3. PIPELINE COMPLETO
+    # ---------------------------
     classifier_pipe = Pipeline(
-        steps=[("model", classifier_fn)]
+        steps=[
+            ("preprocess", preprocessor),
+            ("model", classifier_fn)
+        ]
     )
 
+    # ---------------------------
+    # 4. TRAIN
+    # ---------------------------
     model = classifier_pipe.fit(x_train, y_train)
 
+    # ---------------------------
+    # 5. PREDICCIONES
+    # ---------------------------
     y_pred = model.predict(x_test)
     y_pred_train = model.predict(x_train)
 
     train_summary = summarize_classification(y_train, y_pred_train)
     test_summary = summarize_classification(y_test, y_pred)
 
+    # ---------------------------
+    # 6. CROSS VALIDATION
+    # ---------------------------
     kfold = KFold(n_splits=10)
 
     cv_results = {}
-    train_results = {}
 
     for metric in scoring_metrics[:-1]:
         cv_results[metric] = cross_val_score(
             classifier_pipe, x_train, y_train, cv=kfold, scoring=metric
         )
 
-        classifier_pipe.fit(x_train, y_train)
-        train_results[metric] = classifier_pipe.score(x_train, y_train)
-
-    cv_results_df = pd.DataFrame(cv_results)
-
+    # ---------------------------
+    # 7. LEARNING CURVE
+    # ---------------------------
     common_params = {
         "X": x_train,
         "y": y_train,
@@ -89,74 +120,87 @@ def build_model(
 
     scoring_metric = "recall"
 
-    train_sizes, train_scores, test_scores, fit_times, score_times = learning_curve(
+    train_sizes, train_scores, test_scores, _, _ = learning_curve(
         classifier_pipe, **common_params, scoring=scoring_metric
     )
 
     train_mean = np.mean(train_scores, axis=1)
-    train_std = np.std(train_scores, axis=1)
-
     test_mean = np.mean(test_scores, axis=1)
-    test_std = np.std(test_scores, axis=1)
-
-    fit_times_mean = np.mean(fit_times, axis=1)
-    fit_times_std = np.std(fit_times, axis=1)
-
-    score_times_mean = np.mean(score_times, axis=1)
-    score_times_std = np.std(score_times, axis=1)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-
     ax.plot(train_sizes, train_mean, "o-", label="Training score")
-    ax.plot(train_sizes, test_mean, "o-", color="orange", label="Cross-validation score")
-
-    ax.fill_between(train_sizes, train_mean - train_std, train_mean + train_std, alpha=0.3)
-    ax.fill_between(train_sizes, test_mean - test_std, test_mean + test_std, alpha=0.3, color="orange")
-
-    ax.set_title(f"Learning Curve for {model.steps[-1][1].__class__.__name__}")
-    ax.set_xlabel("Training examples")
-    ax.set_ylabel(scoring_metric)
-    ax.legend(loc="best")
-
+    ax.plot(train_sizes, test_mean, "o-", label="Cross-validation score")
+    ax.set_title(f"Learning Curve - {classifier_fn.__class__.__name__}")
+    ax.legend()
     plt.show()
 
-    print("Training Sizes:", train_sizes)
-    print("Training Scores Mean:", train_mean)
-    print("Training Scores Std:", train_std)
-    print("Test Scores Mean:", test_mean)
-    print("Test Scores Std:", test_std)
+    # ---------------------------
+    # 8. GUARDAR MODELO
+    # ---------------------------
+    joblib.dump(model, save_path_modelo)
+    joblib.dump((x_test, y_test),save_path_data)
 
-    fig, ax = plt.subplots(nrows=2, figsize=(10, 12), sharex=True)
+    print(f"✅ Modelo guardado en: {save_path_modelo}")
+    print(f"✅ Data guardada en: {save_path_data}")
 
-    ax[0].plot(train_sizes, fit_times_mean, "o-")
-    ax[0].fill_between(
-        train_sizes,
-        fit_times_mean - fit_times_std,
-        fit_times_mean + fit_times_std,
-        alpha=0.3,
+    return {
+        "train": train_summary,
+        "test": test_summary
+    }
+
+
+# ==========================================
+# ENTRYPOINT (AQUÍ SE CARGA EL EXCEL)
+# ==========================================
+if __name__ == "__main__":
+
+    print("🚀 Iniciando entrenamiento...")
+
+    # ---------------------------
+    # 1. CARGAR DATOS
+    # ---------------------------
+    df = cargarDatos()
+
+    print(f"📊 Datos cargados: {df.shape}")
+
+    # ---------------------------
+    # 2. CONFIGURACIÓN
+    # ---------------------------
+    data_params = {
+        "name_of_y_col": "Pago_atiempo",
+        "names_of_x_cols": [
+            "capital_prestado",
+            "plazo_meses",
+            "edad_cliente",
+            "salario_cliente",
+            "total_otros_prestamos",
+            "cuota_pactada",
+            "puntaje",
+            "puntaje_datacredito",
+            "cant_creditosvigentes",
+            "huella_consulta",
+            "saldo_mora",
+            "saldo_total",
+            "saldo_principal",
+            "saldo_mora_codeudor",
+            "creditos_sectorFinanciero",
+            "creditos_sectorCooperativo",
+            "creditos_sectorReal",
+            "promedio_ingresos_datacredito",
+            "tipo_laboral",
+            "tendencia_ingresos",
+            "tipo_credito"
+        ],
+        "dataset": df
+    }
+
+    # ---------------------------
+    # 3. ENTRENAR
+    # ---------------------------
+    result = build_model(
+        classifier_fn=RandomForestClassifier(),
+        data_params=data_params
     )
 
-    ax[0].set_ylabel("Fit time (s)")
-    ax[0].set_title(
-        f"Scalability of the {model.steps[-1][1].__class__.__name__} classifier"
-    )
-
-    ax[1].plot(train_sizes, score_times_mean, "o-")
-    ax[1].fill_between(
-        train_sizes,
-        score_times_mean - score_times_std,
-        score_times_mean + score_times_std,
-        alpha=0.3,
-    )
-
-    ax[1].set_ylabel("Score time (s)")
-    ax[1].set_xlabel("Number of training samples")
-
-    plt.show()
-
-    print("Fit Times Mean:", fit_times_mean)
-    print("Fit Times Std:", fit_times_std)
-    print("Score Times Mean:", score_times_mean)
-    print("Score Times Std:", score_times_std)
-
-    return {"train": train_summary, "test": test_summary}
+    print("✅ Entrenamiento terminado")
+    print(result)
